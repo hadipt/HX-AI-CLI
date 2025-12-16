@@ -69,7 +69,7 @@
     }
   },
   "bin": {
-    "revo": "bundle/gemini.js"
+    "gemini": "bundle/gemini.js"
   },
   "files": [
     "bundle/",
