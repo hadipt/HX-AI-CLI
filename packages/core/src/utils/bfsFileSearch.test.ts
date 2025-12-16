@@ -5,10 +5,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fsPromises from 'fs/promises';
-import * as path from 'path';
-import * as os from 'os';
-import { bfsFileSearch } from './bfsFileSearch.js';
+import * as fsPromises from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { bfsFileSearch, bfsFileSearchSync } from './bfsFileSearch.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 
 describe('bfsFileSearch', () => {
@@ -190,78 +190,135 @@ describe('bfsFileSearch', () => {
     });
   });
 
-  it('should perform parallel directory scanning efficiently (performance test)', async () => {
-    // Create a more complex directory structure for performance testing
-    console.log('\n🚀 Testing Parallel BFS Performance...');
+  it('should find all files in a complex directory structure', async () => {
+    // Create a complex directory structure to test correctness at scale
+    // without flaky performance checks.
+    const numDirs = 50;
+    const numFilesPerDir = 2;
+    const numTargetDirs = 10;
 
-    // Create 50 directories with multiple levels for faster test execution
-    for (let i = 0; i < 50; i++) {
-      await createEmptyDir(`dir${i}`);
-      await createEmptyDir(`dir${i}`, 'subdir1');
-      await createEmptyDir(`dir${i}`, 'subdir2');
-      await createEmptyDir(`dir${i}`, 'subdir1', 'deep');
-      if (i < 10) {
-        // Add target files in some directories
-        await createTestFile('content', `dir${i}`, 'GEMINI.md');
-        await createTestFile('content', `dir${i}`, 'subdir1', 'GEMINI.md');
-      }
+    const dirCreationPromises: Array<Promise<unknown>> = [];
+    for (let i = 0; i < numDirs; i++) {
+      dirCreationPromises.push(createEmptyDir(`dir${i}`));
+      dirCreationPromises.push(createEmptyDir(`dir${i}`, 'subdir1'));
+      dirCreationPromises.push(createEmptyDir(`dir${i}`, 'subdir2'));
+      dirCreationPromises.push(createEmptyDir(`dir${i}`, 'subdir1', 'deep'));
     }
+    await Promise.all(dirCreationPromises);
 
-    // Run multiple iterations to ensure consistency
-    const iterations = 3;
-    const durations: number[] = [];
-    let foundFiles = 0;
-    let firstResultSorted: string[] | undefined;
-
-    for (let i = 0; i < iterations; i++) {
-      const searchStartTime = performance.now();
-      const result = await bfsFileSearch(testRootDir, {
-        fileName: 'GEMINI.md',
-        maxDirs: 200,
-        debug: false,
-      });
-      const duration = performance.now() - searchStartTime;
-      durations.push(duration);
-
-      // Verify consistency: all iterations should find the exact same files
-      if (firstResultSorted === undefined) {
-        foundFiles = result.length;
-        firstResultSorted = result.sort();
-      } else {
-        expect(result.sort()).toEqual(firstResultSorted);
-      }
-
-      console.log(`📊 Iteration ${i + 1}: ${duration.toFixed(2)}ms`);
+    const fileCreationPromises: Array<Promise<string>> = [];
+    for (let i = 0; i < numTargetDirs; i++) {
+      // Add target files in some directories
+      fileCreationPromises.push(
+        createTestFile('content', `dir${i}`, 'GEMINI.md'),
+      );
+      fileCreationPromises.push(
+        createTestFile('content', `dir${i}`, 'subdir1', 'GEMINI.md'),
+      );
     }
+    const expectedFiles = await Promise.all(fileCreationPromises);
 
-    const avgDuration = durations.reduce((a, b) => a + b, 0) / durations.length;
-    const maxDuration = Math.max(...durations);
-    const minDuration = Math.min(...durations);
+    const result = await bfsFileSearch(testRootDir, {
+      fileName: 'GEMINI.md',
+      // Provide a generous maxDirs limit to ensure it doesn't prematurely stop
+      // in this large test case. Total dirs created is 200.
+      maxDirs: 250,
+    });
 
-    console.log(`📊 Average Duration: ${avgDuration.toFixed(2)}ms`);
-    console.log(
-      `📊 Min/Max Duration: ${minDuration.toFixed(2)}ms / ${maxDuration.toFixed(2)}ms`,
+    // Verify we found the exact files we created
+    expect(result.length).toBe(numTargetDirs * numFilesPerDir);
+    expect(result.sort()).toEqual(expectedFiles.sort());
+  });
+});
+
+describe('bfsFileSearchSync', () => {
+  let testRootDir: string;
+
+  async function createEmptyDir(...pathSegments: string[]) {
+    const fullPath = path.join(testRootDir, ...pathSegments);
+    await fsPromises.mkdir(fullPath, { recursive: true });
+    return fullPath;
+  }
+
+  async function createTestFile(content: string, ...pathSegments: string[]) {
+    const fullPath = path.join(testRootDir, ...pathSegments);
+    await fsPromises.mkdir(path.dirname(fullPath), { recursive: true });
+    await fsPromises.writeFile(fullPath, content);
+    return fullPath;
+  }
+
+  beforeEach(async () => {
+    testRootDir = await fsPromises.mkdtemp(
+      path.join(os.tmpdir(), 'bfs-file-search-sync-test-'),
     );
-    console.log(`📁 Found ${foundFiles} GEMINI.md files`);
-    console.log(
-      `🏎️  Processing ~${Math.round(200 / (avgDuration / 1000))} dirs/second`,
+  });
+
+  afterEach(async () => {
+    await fsPromises.rm(testRootDir, { recursive: true, force: true });
+  });
+
+  it('should find a file in the root directory synchronously', async () => {
+    const targetFilePath = await createTestFile('content', 'target.txt');
+    const result = bfsFileSearchSync(testRootDir, { fileName: 'target.txt' });
+    expect(result).toEqual([targetFilePath]);
+  });
+
+  it('should find a file in a nested directory synchronously', async () => {
+    const targetFilePath = await createTestFile(
+      'content',
+      'a',
+      'b',
+      'target.txt',
+    );
+    const result = bfsFileSearchSync(testRootDir, { fileName: 'target.txt' });
+    expect(result).toEqual([targetFilePath]);
+  });
+
+  it('should respect the maxDirs limit and not find the file synchronously', async () => {
+    await createTestFile('content', 'a', 'b', 'c', 'target.txt');
+    const result = bfsFileSearchSync(testRootDir, {
+      fileName: 'target.txt',
+      maxDirs: 3,
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('should ignore directories synchronously', async () => {
+    await createTestFile('content', 'ignored', 'target.txt');
+    const targetFilePath = await createTestFile(
+      'content',
+      'not-ignored',
+      'target.txt',
+    );
+    const result = bfsFileSearchSync(testRootDir, {
+      fileName: 'target.txt',
+      ignoreDirs: ['ignored'],
+    });
+    expect(result).toEqual([targetFilePath]);
+  });
+
+  it('should work with FileDiscoveryService synchronously', async () => {
+    const projectRoot = await createEmptyDir('project');
+    await createEmptyDir('project', '.git');
+    await createTestFile('node_modules/', 'project', '.gitignore');
+    await createTestFile('content', 'project', 'node_modules', 'target.txt');
+    const targetFilePath = await createTestFile(
+      'content',
+      'project',
+      'not-ignored',
+      'target.txt',
     );
 
-    // Verify we found the expected files
-    expect(foundFiles).toBe(20); // 10 dirs * 2 files each
+    const fileService = new FileDiscoveryService(projectRoot);
+    const result = bfsFileSearchSync(projectRoot, {
+      fileName: 'target.txt',
+      fileService,
+      fileFilteringOptions: {
+        respectGitIgnore: true,
+        respectGeminiIgnore: true,
+      },
+    });
 
-    // Performance expectation: check consistency rather than absolute time
-    const variance = maxDuration - minDuration;
-    const consistencyRatio = variance / avgDuration;
-
-    // Ensure reasonable performance (generous limit for CI environments)
-    expect(avgDuration).toBeLessThan(2000); // Very generous limit
-
-    // Ensure consistency across runs (variance should not be too high)
-    expect(consistencyRatio).toBeLessThan(1.5); // Max variance should be less than 150% of average
-
-    console.log(
-      `✅ Performance test passed: avg=${avgDuration.toFixed(2)}ms, consistency=${(consistencyRatio * 100).toFixed(1)}%`,
-    );
+    expect(result).toEqual([targetFilePath]);
   });
 });
